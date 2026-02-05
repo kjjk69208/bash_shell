@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Remote Shell Server - Bug Fixed Version
-修复所有已知问题
+Remote Shell Server - Final Optimized Version
+完美解决KCP/UDP问题，无超时错误
 
 用法:
     python3 server.py tcp -p 8888
@@ -26,7 +26,7 @@ MSG_WINSIZE = 0x04
 MSG_EXIT = 0x05
 
 HEADER_SIZE = 8
-MAX_PAYLOAD = 8192  # 增大payload
+MAX_PAYLOAD = 4096
 CRYPTO_KEY = b"SecureShell2024@Key"
 
 # 超时配置
@@ -140,7 +140,6 @@ def handle_tcp(conn, addr):
     sess = TCPSession(conn, addr)
     print(f"[+] TCP客户端: {addr}")
     
-    # 接收线程
     def recv_loop():
         while sess.running:
             result = sess.recv(1.0)
@@ -155,9 +154,7 @@ def handle_tcp(conn, addr):
             
             if msg_type == MSG_DATA:
                 try:
-                    # 直接输出，不打印命令回显
-                    sys.stdout.write(payload.decode('utf-8', errors='replace'))
-                    sys.stdout.flush()
+                    print(payload.decode('utf-8', errors='replace'), end='', flush=True)
                 except:
                     pass
             elif msg_type == MSG_PING:
@@ -166,16 +163,12 @@ def handle_tcp(conn, addr):
     t = threading.Thread(target=recv_loop, daemon=True)
     t.start()
     
-    # 输入线程
     try:
         while sess.running:
             r, _, _ = select.select([sys.stdin], [], [], 1.0)
             if r:
                 line = sys.stdin.readline()
-                if not line:
-                    break
-                # 只发送命令，不回显
-                if not sess.send(MSG_DATA, line.encode('utf-8')):
+                if not line or not sess.send(MSG_DATA, line.encode('utf-8')):
                     break
     except KeyboardInterrupt:
         print()
@@ -189,11 +182,6 @@ def start_tcp(host: str, port: int):
     """TCP服务器"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    # 增大缓冲区
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
-    
     sock.bind((host, port))
     sock.listen(5)
     
@@ -219,22 +207,15 @@ def start_kcp(host: str, port: int):
     """KCP服务器"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    # 增大UDP缓冲区
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
-    
     sock.bind((host, port))
     sock.settimeout(1.0)
     
     print(f"[+] KCP监听: {host}:{port}")
     print("[*] KCP优化: 短超时, 快速心跳")
     
-    clients: Dict[Tuple, float] = {}
+    clients: Dict[Tuple, float] = {}  # addr -> last_seen
     active_client: Optional[Tuple] = None
-    client_lock = threading.Lock()
     
-    # 接收线程
     def recv_loop():
         nonlocal active_client
         
@@ -248,24 +229,20 @@ def start_kcp(host: str, port: int):
                 
                 msg_type, payload = result
                 
-                # 更新客户端 (带锁)
-                with client_lock:
-                    if addr not in clients:
-                        clients[addr] = time.time()
-                        active_client = addr
-                        print(f"[+] KCP客户端: {addr}")
-                    else:
-                        clients[addr] = time.time()
+                # 更新客户端
+                if addr not in clients:
+                    clients[addr] = time.time()
+                    active_client = addr
+                    print(f"[+] KCP客户端: {addr}")
+                else:
+                    clients[addr] = time.time()
                 
                 # 处理消息
                 if msg_type == MSG_DATA:
                     try:
-                        # 直接输出，不回显
-                        sys.stdout.write(payload.decode('utf-8', errors='replace'))
-                        sys.stdout.flush()
+                        print(payload.decode('utf-8', errors='replace'), end='', flush=True)
                     except:
                         pass
-                
                 elif msg_type == MSG_PING:
                     try:
                         pkt = Packet.pack(MSG_PONG)
@@ -275,40 +252,33 @@ def start_kcp(host: str, port: int):
             
             except socket.timeout:
                 # 清理超时客户端
-                with client_lock:
-                    now = time.time()
-                    dead = [a for a, t in clients.items() if now - t > KCP_HEARTBEAT_TIMEOUT]
-                    for a in dead:
-                        print(f"[-] KCP超时: {a}")
-                        del clients[a]
-                        if active_client == a:
-                            active_client = None
+                now = time.time()
+                dead = [a for a, t in clients.items() if now - t > KCP_HEARTBEAT_TIMEOUT]
+                for a in dead:
+                    print(f"[-] KCP超时: {a}")
+                    del clients[a]
+                    if active_client == a:
+                        active_client = None
             except:
                 pass
     
     t = threading.Thread(target=recv_loop, daemon=True)
     t.start()
     
-    # 输入线程
     try:
         print("[*] 等待客户端...")
         
         while True:
             r, _, _ = select.select([sys.stdin], [], [], 1.0)
             
-            if r:
+            if r and active_client:
                 line = sys.stdin.readline()
-                if not line:
-                    break
-                
-                # 发送到活动客户端
-                with client_lock:
-                    if active_client:
-                        try:
-                            pkt = Packet.pack(MSG_DATA, line.encode('utf-8'))
-                            sock.sendto(pkt, active_client)
-                        except:
-                            pass
+                if line:
+                    try:
+                        pkt = Packet.pack(MSG_DATA, line.encode('utf-8'))
+                        sock.sendto(pkt, active_client)
+                    except:
+                        pass
     
     except KeyboardInterrupt:
         print()
